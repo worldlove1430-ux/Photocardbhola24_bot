@@ -131,29 +131,50 @@ def cover(im, w, h, focus_y=0.35):
     return im.crop((left, top, left + w, top + h))
 
 
-def layout_words(words, f, size, maxw):
+def wrap_lines(text, f, size, maxw):
     sp = f.width(" ", size)
     lines, cur, curw = [], [], 0.0
-    for i, wd in enumerate(words):
-        ww = f.width(wd[0], size)
+    for wd in text.split():
+        ww = f.width(wd, size)
         if cur and curw + sp + ww > maxw:
-            lines.append((cur, curw))
+            lines.append(" ".join(cur))
             cur, curw = [], 0.0
         curw += (sp if cur else 0) + ww
-        cur.append((wd[0], wd[1], ww))
+        cur.append(wd)
     if cur:
-        lines.append((cur, curw))
-    return lines, sp
+        lines.append(" ".join(cur))
+    return lines
 
 
-def tokenize(title):
-    """Red words, last word black. A | in the text decides the split instead."""
-    title = " ".join(title.split())
-    if "|" in title:
-        left, right = title.split("|", 1)
-        return [(w, RED) for w in left.split()] + [(w, BLACK) for w in right.split()]
-    words = title.split()
-    return [(w, RED if i < len(words) - 1 else BLACK) for i, w in enumerate(words)]
+def headline_lines(title, f, maxw):
+    """Returns (lines, size). All lines red except the last, which is black.
+    Enter or | in the title decides the split; otherwise it is split into two balanced lines."""
+    explicit = [p.strip() for p in re.split(r"[\n|]+", title) if p.strip()]
+    if len(explicit) >= 2:
+        lines = [" ".join(p.split()) for p in explicit]
+    else:
+        title = " ".join(title.split())
+        words = title.split()
+        if len(words) < 2:
+            lines = [title or " "]
+        else:
+            best = None
+            for k in range(1, len(words)):
+                a_, b_ = " ".join(words[:k]), " ".join(words[k:])
+                m = max(f.width(a_, 100), f.width(b_, 100))
+                if best is None or m < best[0]:
+                    best = (m, [a_, b_])
+            lines = best[1]
+    size = int(min(110, 100 * maxw / max(f.width(l, 100) for l in lines)))
+    while size > 40 and max(f.width(l, size) for l in lines) > maxw:
+        size -= 1
+    if len(explicit) < 2 and size < 56:
+        # very long title: wrap into up to three lines instead
+        for size in range(56, 39, -2):
+            lines = wrap_lines(" ".join(title.split()), f, size, maxw)
+            if len(lines) <= 3:
+                break
+    return lines, size
 
 
 def make_card(photo, title, date_text, badge=DEFAULT_BADGE, banner=None):
@@ -172,24 +193,14 @@ def make_card(photo, title, date_text, badge=DEFAULT_BADGE, banner=None):
     d.rounded_rectangle((bx, 700, bx + bw, 764), radius=24, fill=RED, outline=(255, 255, 255), width=4)
     bf.draw(card, badge, bsize, bx + (bw - bf.width(badge, bsize)) / 2, 700 + 46, (255, 255, 255))
 
-    # headline
-    hf = face("HindSiliguri-Bold.ttf")
-    words = tokenize(title) or [(" ", BLACK)]
-    maxw = 1140
-    size = 120
-    while True:
-        lines, sp = layout_words(words, hf, size, maxw)
-        if (len(lines) <= 3 and len(lines) * size * 1.3 <= 330) or size <= 52:
-            break
-        size -= 4
-    lh = size * 1.3
-    top = 985 - len(lines) * lh / 2
-    for n, (ws, lw) in enumerate(lines):
-        x = (W - lw) / 2
-        baseline = top + n * lh + size * 1.0
-        for wd, color, ww in ws:
-            hf.draw(card, wd, size, x, baseline, color)
-            x += ww + sp
+    # headline: every line red, the last line black
+    hf = face("HindSiliguri-SemiBold.ttf")
+    lines, size = headline_lines(title, hf, 1190)
+    lh = size * 1.32
+    top = 962 - len(lines) * lh / 2
+    for n, line in enumerate(lines):
+        color = BLACK if n == len(lines) - 1 else RED
+        hf.draw(card, line, size, (W - hf.width(line, size)) / 2, top + n * lh + size * 1.0, color)
 
     # logo
     logo = Image.open(asset("logo.png")).convert("RGBA")
@@ -316,7 +327,7 @@ HELP = ("ভোলার বাণীর ফটোকার্ড বট\n\n"
         "/badge নতুন লেখা  লাল ব্যাজের লেখা বদলাতে\n"
         "/reset  আগের ডিজাইনে ফিরতে\n"
         "/settings  এখনকার সেটিং দেখতে\n\n"
-        "শিরোনামে | চিহ্ন দিলে তার ডানের অংশ কালো হবে।")
+        "নিজে লাইন ভাগ করতে চাইলে শিরোনামে Enter দিয়ে নতুন লাইনে লিখুন। উপরের লাইন লাল, নিচের লাইন কালো হবে।")
 
 
 def send_card(chat_id, photo_bytes, title, dt):
