@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -25,14 +26,17 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
     "Accept-Language": "bn-BD,bn;q=0.9,en;q=0.8",
 }
+MAX_DESIGNS = 5
 
 # ---------------------------------------------------------------- assets
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSET_DIR = os.path.join("/tmp", "card_assets")
+DESIGN_DIR = os.path.join("/tmp", "card_designs")
 
 
 def prepare_assets():
     os.makedirs(ASSET_DIR, exist_ok=True)
+    os.makedirs(DESIGN_DIR, exist_ok=True)
     zp = os.path.join(HERE, "assets.zip")
     if os.path.exists(zp):
         with zipfile.ZipFile(zp) as z:
@@ -40,6 +44,7 @@ def prepare_assets():
 
 
 def asset(name):
+    name = os.path.basename(name)
     for d in (ASSET_DIR, HERE):
         p = os.path.join(d, name)
         if os.path.exists(p):
@@ -49,13 +54,7 @@ def asset(name):
 
 prepare_assets()
 
-# ---------------------------------------------------------------- card layout
-W, H = 1229, 1536
-PHOTO_H = 678
-BANNER_Y, BANNER_H = 1384, 152
-RED = (231, 65, 45)
-BLACK = (20, 20, 20)
-DEFAULT_BADGE = "বিস্তারিত কমেন্টে"
+# ---------------------------------------------------------------- text engine
 BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
 BN_MONTHS = ["জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন", "জুলাই",
              "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"]
@@ -107,10 +106,15 @@ class Face:
 _faces = {}
 
 
-def face(name):
-    if name not in _faces:
-        _faces[name] = Face(asset(name))
-    return _faces[name]
+def face_at(path):
+    if path not in _faces:
+        _faces[path] = Face(path)
+    return _faces[path]
+
+
+def rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def bn_date(dt):
@@ -146,9 +150,9 @@ def wrap_lines(text, f, size, maxw):
     return lines
 
 
-def headline_lines(title, f, maxw):
-    """Returns (lines, size). All lines red except the last, which is black.
-    Enter or | in the title decides the split; otherwise it is split into two balanced lines."""
+def headline_lines(title, f, maxw, max_size=110):
+    """Returns (lines, size). Enter or | in the title decides the split;
+    otherwise the title is split into two balanced lines."""
     explicit = [p.strip() for p in re.split(r"[\n|]+", title) if p.strip()]
     if len(explicit) >= 2:
         lines = [" ".join(p.split()) for p in explicit]
@@ -165,11 +169,10 @@ def headline_lines(title, f, maxw):
                 if best is None or m < best[0]:
                     best = (m, [a_, b_])
             lines = best[1]
-    size = int(min(110, 100 * maxw / max(f.width(l, 100) for l in lines)))
+    size = int(min(max_size, 100 * maxw / max(f.width(l, 100) for l in lines)))
     while size > 40 and max(f.width(l, size) for l in lines) > maxw:
         size -= 1
     if len(explicit) < 2 and size < 56:
-        # very long title: wrap into up to three lines instead
         for size in range(56, 39, -2):
             lines = wrap_lines(" ".join(title.split()), f, size, maxw)
             if len(lines) <= 3:
@@ -177,42 +180,139 @@ def headline_lines(title, f, maxw):
     return lines, size
 
 
-def make_card(photo, title, date_text, badge=DEFAULT_BADGE, banner=None):
+# ---------------------------------------------------------------- designs
+# A design is a folder with design.json and its images (and optional fonts).
+def load_spec(path):
+    with open(os.path.join(path, "design.json"), encoding="utf-8") as fh:
+        spec = json.load(fh)
+    spec["_dir"] = path
+    w, h = spec["size"]
+    if not (200 <= w <= 4000 and 200 <= h <= 4000):
+        raise ValueError("size ঠিক নেই")
+    if len(spec["headline"]["box"]) != 4:
+        raise ValueError("headline box ঠিক নেই")
+    for key in ("overlay",):
+        if spec.get(key) and not os.path.exists(os.path.join(path, os.path.basename(spec[key]))):
+            raise ValueError(f"{spec[key]} ফাইল নেই")
+    return spec
+
+
+_default = {}
+
+
+def default_spec():
+    if "spec" not in _default:
+        _default["spec"] = load_spec(os.path.join(ASSET_DIR, "default"))
+    return _default["spec"]
+
+
+def design_path(spec, name):
+    p = os.path.join(spec["_dir"], os.path.basename(name))
+    return p if os.path.exists(p) else asset(name)
+
+
+def make_card(photo, title, date_text, spec, badge=None, banner=None):
+    W, H = spec["size"]
     card = Image.new("RGB", (W, H), (255, 255, 255))
-    card.paste(Image.open(asset("template.png")).convert("RGB"), (0, PHOTO_H))
-    card.paste(cover(photo, W, PHOTO_H), (0, 0))
-    if banner is not None:
-        card.paste(cover(banner, W, BANNER_H, 0.5), (0, BANNER_Y))
 
-    # badge
-    bf = face("HindSiliguri-SemiBold.ttf")
-    bsize = 40
-    bw = int(bf.width(badge, bsize)) + 84
-    bx = (W - bw) // 2
-    d = ImageDraw.Draw(card)
-    d.rounded_rectangle((bx, 700, bx + bw, 764), radius=24, fill=RED, outline=(255, 255, 255), width=4)
-    bf.draw(card, badge, bsize, bx + (bw - bf.width(badge, bsize)) / 2, 700 + 46, (255, 255, 255))
+    ph = spec.get("photo")
+    if ph:
+        x1, y1, x2, y2 = ph["box"]
+        card.paste(cover(photo, x2 - x1, y2 - y1, ph.get("focus", 0.35)), (x1, y1))
+    if spec.get("overlay"):
+        ov = Image.open(design_path(spec, spec["overlay"])).convert("RGBA")
+        card.paste(ov, (0, 0), ov)
+    bn = spec.get("banner")
+    if bn and banner is not None:
+        x1, y1, x2, y2 = bn["box"]
+        card.paste(cover(banner, x2 - x1, y2 - y1, 0.5), (x1, y1))
 
-    # headline: every line red, the last line black
-    hf = face("HindSiliguri-SemiBold.ttf")
-    lines, size = headline_lines(title, hf, 1190)
-    lh = size * 1.32
-    top = 962 - len(lines) * lh / 2
+    bd = spec.get("badge")
+    if bd:
+        text = badge or bd.get("text", "")
+        bf = face_at(design_path(spec, bd.get("font", "HindSiliguri-SemiBold.ttf")))
+        size = bd.get("size", 40)
+        tw = bf.width(text, size)
+        bw = int(tw) + bd.get("pad", 84)
+        bx = (W - bw) // 2
+        y = bd["y"]
+        d = ImageDraw.Draw(card)
+        d.rounded_rectangle((bx, y, bx + bw, y + bd.get("h", 64)), radius=bd.get("radius", 24),
+                            fill=rgb(bd.get("fill", "#e7412d")),
+                            outline=rgb(bd.get("outline", "#ffffff")), width=bd.get("outline_w", 4))
+        bf.draw(card, text, size, bx + (bw - tw) / 2, y + bd.get("baseline", 46), rgb(bd.get("color", "#ffffff")))
+
+    hs = spec["headline"]
+    hf = face_at(design_path(spec, hs.get("font", "HindSiliguri-SemiBold.ttf")))
+    x1, y1, x2, y2 = hs["box"]
+    lines, size = headline_lines(title, hf, x2 - x1, hs.get("max_size", 110))
+    lh = size * hs.get("line_height", 1.32)
+    top = hs.get("center_y", (y1 + y2) / 2) - len(lines) * lh / 2
+    cols = hs.get("colors", ["#141414"])
+    c_main, c_last = rgb(cols[0]), rgb(cols[-1])
+    align = hs.get("align", "center")
     for n, line in enumerate(lines):
-        color = BLACK if n == len(lines) - 1 else RED
-        hf.draw(card, line, size, (W - hf.width(line, size)) / 2, top + n * lh + size * 1.0, color)
+        w = hf.width(line, size)
+        x = x1 if align == "left" else (x2 - w if align == "right" else x1 + (x2 - x1 - w) / 2)
+        hf.draw(card, line, size, x, top + n * lh + size * 1.0, c_last if n == len(lines) - 1 else c_main)
 
-    # logo
-    logo = Image.open(asset("logo.png")).convert("RGBA")
-    lw_ = 340
-    logo = logo.resize((lw_, int(logo.height * lw_ / logo.width)), Image.LANCZOS)
-    card.paste(logo, ((W - lw_) // 2, 1188), logo)
+    lg = spec.get("logo")
+    if lg:
+        logo = Image.open(design_path(spec, lg["file"])).convert("RGBA")
+        lw = lg.get("w", logo.width)
+        logo = logo.resize((lw, int(logo.height * lw / logo.width)), Image.LANCZOS)
+        lx = (W - lw) // 2 if lg.get("x", "center") == "center" else lg["x"]
+        card.paste(logo, (lx, lg["y"]), logo)
 
-    # date line
-    rf = face("HindSiliguri-Regular.ttf")
-    line = f"{date_text}।  ভোলার বাণী"
-    rf.draw(card, line, 27, (W - rf.width(line, 27)) / 2, 1320, (30, 30, 30))
+    dt = spec.get("date")
+    if dt:
+        rf = face_at(design_path(spec, dt.get("font", "HindSiliguri-Regular.ttf")))
+        line = dt.get("text", "{date}").replace("{date}", date_text)
+        size = dt.get("size", 27)
+        w = rf.width(line, size)
+        dx = (W - w) / 2 if dt.get("x", "center") == "center" else dt["x"]
+        rf.draw(card, line, size, dx, dt["baseline"], rgb(dt.get("color", "#1e1e1e")))
     return card
+
+
+def extract_zip_flat(data, dest):
+    os.makedirs(dest, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for info in z.infolist():
+            name = os.path.basename(info.filename)
+            if info.is_dir() or not name or info.file_size > 15_000_000:
+                continue
+            with z.open(info) as src, open(os.path.join(dest, name), "wb") as out:
+                out.write(src.read())
+
+
+DESIGN_CACHE = {}
+
+
+def design_from_file_id(file_id):
+    if file_id in DESIGN_CACHE:
+        return DESIGN_CACHE[file_id]
+    dest = os.path.join(DESIGN_DIR, hashlib.sha1(file_id.encode()).hexdigest()[:14])
+    if not os.path.exists(os.path.join(dest, "design.json")):
+        extract_zip_flat(tg_download(file_id), dest)
+    spec = load_spec(dest)
+    DESIGN_CACHE[file_id] = spec
+    return spec
+
+
+def active_spec(cfg):
+    key = cfg.get("active", "default")
+    if key != "default" and key in cfg["designs"]:
+        return design_from_file_id(cfg["designs"][key]["f"])
+    return default_spec()
+
+
+def placeholder_photo():
+    im = Image.new("RGB", (1600, 900), (96, 112, 138))
+    d = ImageDraw.Draw(im)
+    d.ellipse((560, 120, 1040, 600), fill=(150, 165, 190))
+    d.rectangle((300, 600, 1300, 900), fill=(70, 84, 108))
+    return im
 
 
 # ---------------------------------------------------------------- news source
@@ -282,57 +382,91 @@ STATE = {}
 
 
 def default_banner_bytes():
-    t = Image.open(asset("template.png")).convert("RGB")
-    b = t.crop((0, BANNER_Y - PHOTO_H, W, BANNER_Y - PHOTO_H + BANNER_H))
+    spec = default_spec()
+    x1, y1, x2, y2 = spec["banner"]["box"]
+    ov = Image.open(design_path(spec, spec["overlay"])).convert("RGB")
     out = io.BytesIO()
-    b.save(out, "JPEG", quality=92)
+    ov.crop((x1, y1, x2, y2)).save(out, "JPEG", quality=92)
     return out.getvalue()
+
+
+def new_cfg():
+    return {"badge": None, "active": "default", "designs": {}, "banner": None}
 
 
 def load_config(chat_id):
     if chat_id in CACHE:
         return CACHE[chat_id]
-    cfg = {"badge": DEFAULT_BADGE, "banner": None}
+    cfg = new_cfg()
     try:
         res = requests.get(f"{API}/getChat", params={"chat_id": chat_id}, timeout=20).json()
         pm = res.get("result", {}).get("pinned_message")
         if pm and pm.get("photo") and "CONFIG:" in (pm.get("caption") or ""):
             data = json.loads(pm["caption"].split("CONFIG:", 1)[1])
-            cfg["badge"] = data.get("badge") or DEFAULT_BADGE
-            cfg["banner"] = Image.open(io.BytesIO(tg_download(pm["photo"][-1]["file_id"]))).convert("RGB")
+            cfg["badge"] = data.get("badge") or None
+            cfg["active"] = data.get("active") or "default"
+            cfg["designs"] = data.get("designs") or {}
+            if data.get("has_banner"):
+                cfg["banner"] = Image.open(io.BytesIO(tg_download(pm["photo"][-1]["file_id"]))).convert("RGB")
     except Exception:
         pass
     CACHE[chat_id] = cfg
     return cfg
 
 
-def save_config(chat_id, badge, banner_bytes=None):
-    if banner_bytes is None:
-        banner_bytes = default_banner_bytes()
-    caption = "সেটিংস, এই মেসেজ পিন করা থাকবে, মুছবেন না\nCONFIG:" + json.dumps({"badge": badge}, ensure_ascii=False)
-    r = tg("sendPhoto", data={"chat_id": chat_id, "caption": caption},
-           files={"photo": ("banner.jpg", banner_bytes)}).json()
+def save_config(chat_id, cfg):
+    if cfg["banner"] is not None:
+        b = io.BytesIO()
+        cfg["banner"].save(b, "JPEG", quality=92)
+        data = b.getvalue()
+    else:
+        data = default_banner_bytes()
+    payload = {"badge": cfg["badge"], "active": cfg["active"], "designs": cfg["designs"],
+               "has_banner": cfg["banner"] is not None}
+    caption = ("সেটিংস, এই মেসেজ পিন করা থাকবে, মুছবেন না\nCONFIG:"
+               + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    if len(caption) > 1000:
+        raise ValueError("সেটিং বেশি লম্বা হয়ে গেছে")
+    r = tg("sendPhoto", data={"chat_id": chat_id, "caption": caption}, files={"photo": ("banner.jpg", data)}).json()
     mid = r.get("result", {}).get("message_id")
     if mid:
         tg("pinChatMessage", json={"chat_id": chat_id, "message_id": mid, "disable_notification": True})
-    CACHE[chat_id] = {"badge": badge, "banner": Image.open(io.BytesIO(banner_bytes)).convert("RGB")}
+    CACHE[chat_id] = cfg
+
+
+def design_names(cfg):
+    items = [("default", default_spec().get("name", "ডিজাইন ১"))]
+    items += [(k, v["n"]) for k, v in cfg["designs"].items()]
+    return items
 
 
 # ---------------------------------------------------------------- bot logic
 HELP = ("ভোলার বাণীর ফটোকার্ড বট\n\n"
         "১. ওয়ার্ডপ্রেসের খবরের লিংক পাঠান, কার্ড তৈরি হয়ে আসবে\n"
         "২. অথবা ছবি পাঠান আর ক্যাপশনে শিরোনাম লিখে দিন\n\n"
+        "ডিজাইন:\n"
+        "/designs  সব ডিজাইনের তালিকা\n"
+        "/design 2  ২ নম্বর ডিজাইন চালু করতে\n"
+        "/adddesign  নতুন ডিজাইন যোগ করতে\n"
+        "/removedesign 2  যোগ করা ডিজাইন মুছতে\n\n"
         "বদলানোর কমান্ড:\n"
         "/banner  নিচের বিজ্ঞাপন ব্যানার বদলাতে\n"
         "/badge নতুন লেখা  লাল ব্যাজের লেখা বদলাতে\n"
-        "/reset  আগের ডিজাইনে ফিরতে\n"
+        "/reset  ব্যাজ, ব্যানার আর ডিজাইন আগের অবস্থায় ফেরাতে\n"
         "/settings  এখনকার সেটিং দেখতে\n\n"
-        "নিজে লাইন ভাগ করতে চাইলে শিরোনামে Enter দিয়ে নতুন লাইনে লিখুন। উপরের লাইন লাল, নিচের লাইন কালো হবে।")
+        "নিজে লাইন ভাগ করতে চাইলে শিরোনামে Enter দিয়ে নতুন লাইনে লিখুন। "
+        "উপরের লাইন প্রথম রঙে, শেষ লাইন দ্বিতীয় রঙে হবে।")
 
 
 def send_card(chat_id, photo_bytes, title, dt):
     cfg = load_config(chat_id)
-    card = make_card(Image.open(io.BytesIO(photo_bytes)), title, bn_date(dt), cfg["badge"], cfg["banner"])
+    try:
+        spec = active_spec(cfg)
+    except Exception as e:
+        print("design load error:", repr(e))
+        say(chat_id, "ডিজাইনটা লোড হয়নি, প্রথম ডিজাইনে বানানো হচ্ছে।")
+        spec = default_spec()
+    card = make_card(Image.open(io.BytesIO(photo_bytes)), title, bn_date(dt), spec, cfg["badge"], cfg["banner"])
     jpg = io.BytesIO()
     card.save(jpg, "JPEG", quality=95)
     png = io.BytesIO()
@@ -341,90 +475,59 @@ def send_card(chat_id, photo_bytes, title, dt):
     tg("sendDocument", data={"chat_id": chat_id, "caption": "পূর্ণ মানের ফাইল"}, files={"document": ("card.png", png.getvalue())})
 
 
+def add_design(chat_id, doc, cfg):
+    if len(cfg["designs"]) >= MAX_DESIGNS:
+        say(chat_id, f"সর্বোচ্চ {MAX_DESIGNS}টা ডিজাইন যোগ করা যায়। আগে /removedesign দিয়ে একটা মুছুন।")
+        return
+    spec = design_from_file_id(doc["file_id"])
+    preview = make_card(placeholder_photo(), "ডিজাইনের নমুনা শিরোনাম এখানে বসবে", bn_date(now_bd()), spec)
+    out = io.BytesIO()
+    preview.save(out, "JPEG", quality=90)
+    n = 2
+    while f"d{n}" in cfg["designs"]:
+        n += 1
+    key = f"d{n}"
+    cfg["designs"][key] = {"n": str(spec.get("name", f"ডিজাইন {n}"))[:30], "f": doc["file_id"]}
+    cfg["active"] = key
+    save_config(chat_id, cfg)
+    tg("sendPhoto", data={"chat_id": chat_id, "caption": "নতুন ডিজাইন যোগ হয়েছে আর এখন চালু আছে। আগেরটায় ফিরতে /design 1 লিখুন।"},
+       files={"photo": ("preview.jpg", out.getvalue())})
+
+
 def handle(msg):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
     caption = (msg.get("caption") or "").strip()
     try:
         img_id = message_image_id(msg)
+        doc = msg.get("document") or {}
+        is_zip = str(doc.get("file_name", "")).lower().endswith(".zip") or "zip" in str(doc.get("mime_type", ""))
+        cfg = load_config(chat_id)
+        cmd = text.split()[0].split("@")[0] if text.startswith("/") else ""
+        arg = text[len(text.split()[0]):].strip() if cmd else ""
 
-        if text.startswith("/start") or text.startswith("/help"):
+        if cmd in ("/start", "/help"):
             say(chat_id, HELP)
-        elif text.startswith("/settings"):
-            cfg = load_config(chat_id)
-            say(chat_id, f"ব্যাজের লেখা: {cfg['badge']}\nব্যানার: {'নতুন দেওয়া' if cfg['banner'] else 'আগেরটাই'}")
-        elif text.startswith("/reset"):
-            save_config(chat_id, DEFAULT_BADGE)
-            say(chat_id, "আগের ডিজাইনে ফিরেছে।")
-        elif text.startswith("/badge"):
-            new = text[len("/badge"):].strip()
-            if not new:
-                say(chat_id, "এভাবে লিখুন: /badge বিস্তারিত কমেন্টে")
+        elif cmd == "/settings":
+            names = dict(design_names(cfg))
+            say(chat_id, f"চালু ডিজাইন: {names.get(cfg['active'], 'ডিজাইন ১')}\n"
+                         f"ব্যাজের লেখা: {cfg['badge'] or 'ডিজাইনের নিজের'}\n"
+                         f"ব্যানার: {'নতুন দেওয়া' if cfg['banner'] else 'আগেরটাই'}")
+        elif cmd == "/designs":
+            lines = []
+            for i, (k, name) in enumerate(design_names(cfg), 1):
+                lines.append(f"{i}. {name}" + ("  (চালু)" if k == cfg["active"] else ""))
+            say(chat_id, "ডিজাইনের তালিকা:\n" + "\n".join(lines) + "\n\nবদলাতে লিখুন: /design 2")
+        elif cmd == "/design":
+            items = design_names(cfg)
+            if not arg.isdigit() or not 1 <= int(arg) <= len(items):
+                say(chat_id, "এভাবে লিখুন: /design 2 (তালিকা দেখতে /designs)")
             else:
-                cfg = load_config(chat_id)
-                banner_bytes = None
-                if cfg["banner"] is not None:
-                    b = io.BytesIO()
-                    cfg["banner"].save(b, "JPEG", quality=92)
-                    banner_bytes = b.getvalue()
-                save_config(chat_id, new, banner_bytes)
-                say(chat_id, f"ব্যাজের লেখা বদলে হয়েছে: {new}")
-        elif text.startswith("/banner"):
-            STATE[chat_id] = "banner"
-            say(chat_id, "নতুন ব্যানারের ছবিটা পাঠান।")
-        elif img_id and STATE.get(chat_id) == "banner":
-            STATE.pop(chat_id, None)
-            raw = tg_download(img_id)
-            b = io.BytesIO()
-            cover(Image.open(io.BytesIO(raw)), W, BANNER_H, 0.5).save(b, "JPEG", quality=92)
-            cfg = load_config(chat_id)
-            save_config(chat_id, cfg["badge"], b.getvalue())
-            say(chat_id, "ব্যানার বদলে গেছে। এবার থেকে নতুন কার্ডে এটা বসবে।")
-        elif img_id:
-            if not caption:
-                say(chat_id, "ছবির সাথে ক্যাপশনে শিরোনাম লিখে আবার পাঠান।")
-            else:
-                say(chat_id, "কার্ড বানানো হচ্ছে...")
-                send_card(chat_id, tg_download(img_id), caption, now_bd())
-        else:
-            m = URL_RE.search(text)
-            if not m:
-                say(chat_id, "খবরের লিংক পাঠান, অথবা /help লিখুন।")
-                return
-            say(chat_id, "কার্ড বানানো হচ্ছে...")
-            title, image, dt = wp_info(m.group(0))
-            if not title or not image:
-                say(chat_id, "লিংক থেকে শিরোনাম বা ছবি পাওয়া যায়নি। ছবি পাঠিয়ে ক্যাপশনে শিরোনাম দিন।")
-                return
-            photo = requests.get(image, headers=HEADERS, timeout=40).content
-            send_card(chat_id, photo, title, dt)
-    except Exception as e:
-        say(chat_id, "কিছু একটা সমস্যা হয়েছে, আবার চেষ্টা করুন।")
-        print("error:", repr(e))
-
-
-@app.route("/")
-def home():
-    return "Bot is running"
-
-
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
-    msg = (request.get_json(silent=True) or {}).get("message")
-    if msg:
-        threading.Thread(target=handle, args=(msg,), daemon=True).start()
-    return "ok"
-
-
-def set_webhook():
-    if TOKEN and BASE_URL:
-        try:
-            requests.get(f"{API}/setWebhook", params={"url": f"{BASE_URL}/webhook/{TOKEN}"}, timeout=20)
-        except Exception:
-            pass
-
-
-set_webhook()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+                key, name = items[int(arg) - 1]
+                cfg["active"] = key
+                save_config(chat_id, cfg)
+                say(chat_id, f"চালু হয়েছে: {name}")
+        elif cmd == "/removedesign":
+            items = design_names(cfg)
+            if not arg.isdigit() or not 2 <= int(arg) <= len(items):
+                say(cha
