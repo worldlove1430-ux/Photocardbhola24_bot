@@ -37,10 +37,10 @@ DESIGN_DIR = os.path.join("/tmp", "card_designs")
 def prepare_assets():
     os.makedirs(ASSET_DIR, exist_ok=True)
     os.makedirs(DESIGN_DIR, exist_ok=True)
-    zp = os.path.join(HERE, "assets.zip")
-    if os.path.exists(zp):
-        with zipfile.ZipFile(zp) as z:
-            z.extractall(ASSET_DIR)
+    for name in sorted(os.listdir(HERE)):
+        if name.lower().startswith("assets") and name.lower().endswith(".zip"):
+            with zipfile.ZipFile(os.path.join(HERE, name)) as z:
+                z.extractall(ASSET_DIR)
 
 
 def asset(name):
@@ -529,5 +529,4 @@ def handle(msg):
                 say(chat_id, f"চালু হয়েছে: {name}")
         elif cmd == "/removedesign":
             items = design_names(cfg)
-            if not arg.isdigit() or not 2 <= int(arg) <= len(items):
-                say(cha
+         
